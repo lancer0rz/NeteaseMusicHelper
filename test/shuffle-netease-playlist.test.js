@@ -10,6 +10,7 @@ const {
   extractPlaylistId,
   parseArgs,
   shuffleInPlace,
+  getEditablePlaylists,
   updatePlaylistOrder,
   run,
 } = require('../shuffle-netease-playlist');
@@ -29,6 +30,7 @@ test('parseArgs reads supported options', () => {
     playlist: '123',
     dryRun: true,
     forceLogin: false,
+    list: false,
     limit: 10,
   });
 });
@@ -38,6 +40,25 @@ test('shuffleInPlace preserves elements', () => {
   const shuffled = shuffleInPlace([...items], () => 0);
   assert.deepEqual([...shuffled].sort(), items);
   assert.equal(shuffled.length, items.length);
+});
+
+
+test('getEditablePlaylists filters subscribed playlists', async () => {
+  const api = {
+    user_playlist: async (query) => ({
+      body: {
+        code: 200,
+        playlist: [
+          { id: 1, name: 'Mine', trackCount: 10, subscribed: false },
+          { id: 2, name: 'Subscribed', trackCount: 20, subscribed: true },
+        ],
+      },
+      query,
+    }),
+  };
+
+  const playlists = await getEditablePlaylists(api, 99, 'MUSIC_U=abc');
+  assert.deepEqual(playlists, [{ id: '1', name: 'Mine', trackCount: 10 }]);
 });
 
 test('updatePlaylistOrder submits JSON stringified numeric ids', async () => {
@@ -116,4 +137,75 @@ test('run submits shuffled order when not dry-run', async () => {
 
   assert.equal(result.changed, true);
   assert.equal(submittedIds, '[2,3,1]');
+});
+
+test('run without playlist lets user choose from editable playlists', async () => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'netease-shuffle-test-'));
+  const cookieFile = path.join(tempDir, 'cookie.json');
+  await fs.writeFile(cookieFile, JSON.stringify({ cookie: 'MUSIC_U=mock' }), 'utf8');
+
+  let requestedPlaylistId;
+  const api = {
+    login_status: async () => ({ body: { data: { account: { id: 42 } } } }),
+    user_playlist: async () => ({
+      body: {
+        code: 200,
+        playlist: [
+          { id: 10, name: 'First', trackCount: 3, subscribed: false },
+          { id: 20, name: 'Second', trackCount: 3, subscribed: false },
+        ],
+      },
+    }),
+    playlist_track_all: async (query) => {
+      requestedPlaylistId = query.id;
+      return {
+        body: {
+          code: 200,
+          songs: [
+            { id: 1, name: 'A', ar: [] },
+            { id: 2, name: 'B', ar: [] },
+            { id: 3, name: 'C', ar: [] },
+          ],
+        },
+      };
+    },
+    playlist_order_update: async () => ({ body: { code: 200 } }),
+  };
+
+  const result = await run(['--cookie-file', cookieFile], {
+    api,
+    random: () => 0,
+    selectPlaylist: () => 2,
+  });
+
+  assert.equal(result.changed, true);
+  assert.equal(requestedPlaylistId, '20');
+});
+
+test('run --list lists editable playlists and exits', async () => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'netease-shuffle-test-'));
+  const cookieFile = path.join(tempDir, 'cookie.json');
+  await fs.writeFile(cookieFile, JSON.stringify({ cookie: 'MUSIC_U=mock' }), 'utf8');
+
+  let trackFetchCalled = false;
+  const api = {
+    login_status: async () => ({ body: { data: { account: { id: 42 } } } }),
+    user_playlist: async () => ({
+      body: {
+        code: 200,
+        playlist: [{ id: 10, name: 'First', trackCount: 3, subscribed: false }],
+      },
+    }),
+    playlist_track_all: async () => {
+      trackFetchCalled = true;
+      return { body: { code: 200, songs: [] } };
+    },
+  };
+
+  const result = await run(['--list', '--cookie-file', cookieFile], { api });
+
+  assert.equal(result.changed, false);
+  assert.equal(result.reason, 'list');
+  assert.equal(result.playlistCount, 1);
+  assert.equal(trackFetchCalled, false);
 });

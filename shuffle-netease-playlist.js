@@ -6,6 +6,8 @@
  */
 
 const fs = require('fs/promises');
+const readline = require('readline/promises');
+const { stdin: input, stdout: output } = require('process');
 const path = require('path');
 const qrcode = require('qrcode-terminal');
 const defaultApi = require('NeteaseCloudMusicApi');
@@ -18,6 +20,7 @@ function parseArgs(argv) {
   const args = {
     dryRun: false,
     forceLogin: false,
+    list: false,
     limit: 100000,
   };
 
@@ -31,6 +34,8 @@ function parseArgs(argv) {
       args.dryRun = true;
     } else if (arg === '--force-login') {
       args.forceLogin = true;
+    } else if (arg === '--list') {
+      args.list = true;
     } else if (arg === '--limit') {
       args.limit = Number(argv[++i]);
     } else if (arg === '--help' || arg === '-h') {
@@ -51,25 +56,28 @@ function parseArgs(argv) {
 
 function printHelp() {
   console.log(`Usage:
-  node shuffle-netease-playlist.js --playlist <playlist-id-or-url> [options]
+  node shuffle-netease-playlist.js [--playlist <playlist-id-or-url>] [options]
 
 Options:
   -p, --playlist <id|url>   NetEase Cloud Music playlist id or URL
       --dry-run            Show the shuffled result but do not submit changes
       --force-login        Ignore cached cookie and scan QR code again
+      --list               List my editable playlists and exit
       --cookie-file <path> Cookie cache file, default: ./.netease-cookie.json
       --limit <n>          Max tracks to read, default: 100000
   -h, --help               Show this help
 
 Examples:
+  node shuffle-netease-playlist.js
+  node shuffle-netease-playlist.js --list
   node shuffle-netease-playlist.js -p 123456789
   node shuffle-netease-playlist.js -p 'https://music.163.com/playlist?id=123456789' --dry-run
 `);
 }
 
-function extractPlaylistId(input) {
-  if (!input) return null;
-  const text = String(input).trim();
+function extractPlaylistId(inputText) {
+  if (!inputText) return null;
+  const text = String(inputText).trim();
 
   if (/^\d+$/.test(text)) return text;
 
@@ -113,13 +121,13 @@ async function saveCookie(cookieFile, cookie) {
   );
 }
 
-async function checkLogin(api, cookie) {
-  if (!cookie) return false;
+async function getLoginAccount(api, cookie) {
+  if (!cookie) return null;
   try {
     const res = await api.login_status({ cookie, timestamp: Date.now() });
-    return Boolean(res.body && res.body.data && res.body.data.account);
+    return res.body && res.body.data && res.body.data.account ? res.body.data.account : null;
   } catch (_) {
-    return false;
+    return null;
   }
 }
 
@@ -168,6 +176,74 @@ async function loginByQr(api, cookieFile, options = {}) {
   }
 
   throw new Error('登录超时，请重新运行脚本。');
+}
+
+async function getEditablePlaylists(api, userId, cookie) {
+  const res = await api.user_playlist({
+    uid: userId,
+    limit: 1000,
+    offset: 0,
+    cookie,
+    timestamp: Date.now(),
+  });
+
+  if (!res.body || res.body.code !== 200 || !Array.isArray(res.body.playlist)) {
+    throw new Error(`Failed to fetch user playlists: ${JSON.stringify(res.body)}`);
+  }
+
+  return res.body.playlist
+    .filter((playlist) => !playlist.subscribed)
+    .map((playlist) => ({
+      id: String(playlist.id),
+      name: playlist.name || '',
+      trackCount: playlist.trackCount || 0,
+    }));
+}
+
+function printPlaylists(playlists) {
+  console.log('\n你的可编辑歌单：');
+  playlists.forEach((playlist, index) => {
+    console.log(
+      `${String(index + 1).padStart(2, ' ')}. ${playlist.name} (${playlist.trackCount} 首, id: ${playlist.id})`,
+    );
+  });
+}
+
+async function selectPlaylistInteractively(playlists, deps = {}) {
+  if (playlists.length === 0) {
+    throw new Error('没有找到可编辑歌单。');
+  }
+
+  printPlaylists(playlists);
+
+  if (deps.selectPlaylist) {
+    const selected = await deps.selectPlaylist(playlists);
+    const playlist = typeof selected === 'number' ? playlists[selected - 1] : selected;
+    if (!playlist || !playlist.id) {
+      throw new Error('选择的歌单无效。');
+    }
+    return playlist;
+  }
+
+  const rl = readline.createInterface({ input, output });
+  try {
+    while (true) {
+      const answer = await rl.question('\n请输入要打乱的歌单序号，或输入 q 退出：');
+      const trimmed = answer.trim().toLowerCase();
+      if (trimmed === 'q' || trimmed === 'quit' || trimmed === 'exit') {
+        throw new Error('已取消。');
+      }
+
+      const index = Number(trimmed);
+      if (Number.isInteger(index) && index >= 1 && index <= playlists.length) {
+        return playlists[index - 1];
+      }
+
+      console.log(`请输入 1-${playlists.length} 之间的数字。`);
+    }
+  } finally {
+    rl.close();
+  }
 }
 
 function shuffleInPlace(array, random = Math.random) {
@@ -237,19 +313,32 @@ async function run(argv, deps = {}) {
     return { changed: false, reason: 'help' };
   }
 
-  const playlistId = extractPlaylistId(args.playlist);
-  if (!playlistId) {
-    printHelp();
-    throw new Error('请用 --playlist 传入歌单 ID 或 https://music.163.com/playlist?id=... 链接。');
-  }
-
   const cookieFile = path.resolve(args.cookieFile || COOKIE_FILE);
   let cookie = args.forceLogin ? '' : await loadCookie(cookieFile);
+  let account = await getLoginAccount(api, cookie);
 
-  if (!(await checkLogin(api, cookie))) {
+  if (!account) {
     cookie = await loginByQr(api, cookieFile, deps.loginOptions);
+    account = await getLoginAccount(api, cookie);
   } else {
     console.log(`已使用缓存登录态：${cookieFile}`);
+  }
+
+  if (!account || !account.id) {
+    throw new Error('登录成功，但无法获取当前账号 ID。');
+  }
+
+  let playlistId = extractPlaylistId(args.playlist);
+  if (!playlistId || args.list) {
+    const playlists = await getEditablePlaylists(api, account.id, cookie);
+    if (args.list) {
+      printPlaylists(playlists);
+      return { changed: false, reason: 'list', playlistCount: playlists.length };
+    }
+
+    const selected = await selectPlaylistInteractively(playlists, deps);
+    playlistId = selected.id;
+    console.log(`\n已选择歌单：${selected.name} (${playlistId})`);
   }
 
   const tracks = await getPlaylistTracks(api, playlistId, cookie, args.limit);
@@ -286,6 +375,9 @@ if (require.main === module) {
 module.exports = {
   parseArgs,
   extractPlaylistId,
+  getLoginAccount,
+  getEditablePlaylists,
+  selectPlaylistInteractively,
   shuffleInPlace,
   sameOrder,
   getPlaylistTracks,

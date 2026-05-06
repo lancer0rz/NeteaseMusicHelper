@@ -14,10 +14,30 @@
 npm install
 ```
 
+### 自动选择歌单
+
+不传 `--playlist` 时，脚本会自动获取你账号下的可编辑歌单，并让你在终端输入序号选择：
+
+```bash
+node shuffle-netease-playlist.js
+```
+
+只想查看自己的可编辑歌单列表，不修改任何内容：
+
+```bash
+node shuffle-netease-playlist.js --list
+```
+
 ### 预览，不修改歌单
 
 ```bash
 node shuffle-netease-playlist.js --playlist 'https://music.163.com/playlist?id=你的歌单ID' --dry-run
+```
+
+如果不想提供具体链接，也可以交互选择后预览：
+
+```bash
+node shuffle-netease-playlist.js --dry-run
 ```
 
 ### 执行打乱
