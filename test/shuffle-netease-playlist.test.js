@@ -82,16 +82,17 @@ test('getSongDetails fetches songs in batches', async () => {
   assert.deepEqual(songs.map((song) => song.id), ['1', '2', '3', '4', '5']);
 });
 
-test('updatePlaylistOrder submits JSON stringified numeric ids', async () => {
+test('updatePlaylistOrder submits song_order_update with playlist id and numeric ids', async () => {
   let payload;
   const api = {
-    playlist_order_update: async (query) => {
+    song_order_update: async (query) => {
       payload = query;
       return { body: { code: 200 } };
     },
   };
 
-  await updatePlaylistOrder(api, ['3', '2', '1'], 'MUSIC_U=abc');
+  await updatePlaylistOrder(api, '999', ['3', '2', '1'], 'MUSIC_U=abc');
+  assert.equal(payload.pid, '999');
   assert.equal(payload.ids, '[3,2,1]');
   assert.equal(payload.cookie, 'MUSIC_U=abc');
 });
@@ -117,7 +118,7 @@ test('run dry-run fetches songs but does not update order', async () => {
         ],
       },
     }),
-    playlist_order_update: async () => {
+    song_order_update: async () => {
       updateCalled = true;
       return { body: { code: 200 } };
     },
@@ -154,7 +155,7 @@ test('run submits shuffled order when not dry-run', async () => {
         ],
       },
     }),
-    playlist_order_update: async (query) => {
+    song_order_update: async (query) => {
       submittedIds = query.ids;
       return { body: { code: 200 } };
     },
@@ -197,7 +198,7 @@ test('run without playlist lets user choose from editable playlists', async () =
         ],
       },
     }),
-    playlist_order_update: async () => ({ body: { code: 200 } }),
+    song_order_update: async () => ({ body: { code: 200 } }),
   };
 
   const result = await run(['--cookie-file', cookieFile], {

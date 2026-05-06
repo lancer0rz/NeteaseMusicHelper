@@ -315,15 +315,16 @@ async function getPlaylistTracks(api, playlistId, cookie, limit) {
   }
 }
 
-async function updatePlaylistOrder(api, ids, cookie) {
-  const res = await api.playlist_order_update({
+async function updatePlaylistOrder(api, playlistId, ids, cookie) {
+  const res = await api.song_order_update({
+    pid: playlistId,
     ids: JSON.stringify(ids.map((id) => Number(id))),
     cookie,
     timestamp: Date.now(),
   });
 
   if (!res.body || res.body.code !== 200) {
-    throw new Error(`Failed to update playlist order: ${JSON.stringify(res.body)}`);
+    throw new Error(`Failed to update playlist song order: ${JSON.stringify(res.body)}`);
   }
   return res.body;
 }
@@ -393,7 +394,7 @@ async function run(argv, deps = {}) {
     return { changed: false, reason: 'dry-run', playlistId, trackCount: shuffled.length };
   }
 
-  await updatePlaylistOrder(api, shuffled.map((track) => track.id), cookie);
+  await updatePlaylistOrder(api, playlistId, shuffled.map((track) => track.id), cookie);
   console.log(`\n完成：已随机打乱歌单 ${playlistId} 的 ${shuffled.length} 首歌曲顺序。`);
   return { changed: true, playlistId, trackCount: shuffled.length };
 }
