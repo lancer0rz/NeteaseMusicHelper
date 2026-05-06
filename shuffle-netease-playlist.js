@@ -1,0 +1,294 @@
+#!/usr/bin/env node
+'use strict';
+
+/**
+ * Randomly shuffle song order in a NetEase Cloud Music playlist.
+ */
+
+const fs = require('fs/promises');
+const path = require('path');
+const qrcode = require('qrcode-terminal');
+const defaultApi = require('NeteaseCloudMusicApi');
+
+const COOKIE_FILE = path.join(process.cwd(), '.netease-cookie.json');
+const LOGIN_POLL_INTERVAL_MS = 2000;
+const LOGIN_TIMEOUT_MS = 180000;
+
+function parseArgs(argv) {
+  const args = {
+    dryRun: false,
+    forceLogin: false,
+    limit: 100000,
+  };
+
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i];
+    if (arg === '--playlist' || arg === '-p') {
+      args.playlist = argv[++i];
+    } else if (arg === '--cookie-file') {
+      args.cookieFile = argv[++i];
+    } else if (arg === '--dry-run') {
+      args.dryRun = true;
+    } else if (arg === '--force-login') {
+      args.forceLogin = true;
+    } else if (arg === '--limit') {
+      args.limit = Number(argv[++i]);
+    } else if (arg === '--help' || arg === '-h') {
+      args.help = true;
+    } else if (!arg.startsWith('-') && !args.playlist) {
+      args.playlist = arg;
+    } else {
+      throw new Error(`Unknown argument: ${arg}`);
+    }
+  }
+
+  if (!Number.isFinite(args.limit) || args.limit < 1) {
+    throw new Error('--limit must be a positive number');
+  }
+
+  return args;
+}
+
+function printHelp() {
+  console.log(`Usage:
+  node shuffle-netease-playlist.js --playlist <playlist-id-or-url> [options]
+
+Options:
+  -p, --playlist <id|url>   NetEase Cloud Music playlist id or URL
+      --dry-run            Show the shuffled result but do not submit changes
+      --force-login        Ignore cached cookie and scan QR code again
+      --cookie-file <path> Cookie cache file, default: ./.netease-cookie.json
+      --limit <n>          Max tracks to read, default: 100000
+  -h, --help               Show this help
+
+Examples:
+  node shuffle-netease-playlist.js -p 123456789
+  node shuffle-netease-playlist.js -p 'https://music.163.com/playlist?id=123456789' --dry-run
+`);
+}
+
+function extractPlaylistId(input) {
+  if (!input) return null;
+  const text = String(input).trim();
+
+  if (/^\d+$/.test(text)) return text;
+
+  try {
+    const url = new URL(text.replace(/^http:\/\//, 'https://'));
+    const id = url.searchParams.get('id');
+    if (id && /^\d+$/.test(id)) return id;
+  } catch (_) {
+    // Fall through to regex extraction.
+  }
+
+  const match = text.match(/[?&]id=(\d+)/) || text.match(/playlist\D+(\d+)/i);
+  return match ? match[1] : null;
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function toCookieString(cookie) {
+  if (!cookie) return '';
+  if (Array.isArray(cookie)) return cookie.join('; ');
+  return String(cookie);
+}
+
+async function loadCookie(cookieFile) {
+  try {
+    const raw = await fs.readFile(cookieFile, 'utf8');
+    const data = JSON.parse(raw);
+    return data.cookie || '';
+  } catch (_) {
+    return '';
+  }
+}
+
+async function saveCookie(cookieFile, cookie) {
+  await fs.writeFile(
+    cookieFile,
+    JSON.stringify({ cookie, savedAt: new Date().toISOString() }, null, 2),
+    'utf8',
+  );
+}
+
+async function checkLogin(api, cookie) {
+  if (!cookie) return false;
+  try {
+    const res = await api.login_status({ cookie, timestamp: Date.now() });
+    return Boolean(res.body && res.body.data && res.body.data.account);
+  } catch (_) {
+    return false;
+  }
+}
+
+async function loginByQr(api, cookieFile, options = {}) {
+  const keyRes = await api.login_qr_key({ timestamp: Date.now() });
+  const key = keyRes.body && keyRes.body.data && keyRes.body.data.unikey;
+  if (!key) {
+    throw new Error(`Failed to get QR login key: ${JSON.stringify(keyRes.body)}`);
+  }
+
+  const qrRes = await api.login_qr_create({ key, qrimg: false, timestamp: Date.now() });
+  const qrurl = qrRes.body && qrRes.body.data && qrRes.body.data.qrurl;
+  if (!qrurl) {
+    throw new Error(`Failed to create QR code: ${JSON.stringify(qrRes.body)}`);
+  }
+
+  console.log('请用网易云音乐 App 扫描下面的二维码登录：');
+  qrcode.generate(qrurl, { small: true });
+
+  const pollIntervalMs = options.pollIntervalMs || LOGIN_POLL_INTERVAL_MS;
+  const timeoutMs = options.timeoutMs || LOGIN_TIMEOUT_MS;
+  const deadline = Date.now() + timeoutMs;
+
+  while (Date.now() < deadline) {
+    await sleep(pollIntervalMs);
+    const checkRes = await api.login_qr_check({ key, timestamp: Date.now() });
+    const body = checkRes.body || {};
+
+    if (body.code === 803) {
+      const cookie = body.cookie || toCookieString(checkRes.cookie);
+      if (!cookie) throw new Error('登录成功，但没有拿到 cookie。');
+      await saveCookie(cookieFile, cookie);
+      console.log('登录成功，cookie 已保存。');
+      return cookie;
+    }
+
+    if (body.code === 802) {
+      process.stdout.write('已扫码，请在手机上确认登录...\n');
+    } else if (body.code === 801) {
+      process.stdout.write('等待扫码...\n');
+    } else if (body.code === 800) {
+      throw new Error('二维码已过期，请重新运行脚本。');
+    } else {
+      process.stdout.write(`登录状态：${JSON.stringify(body)}\n`);
+    }
+  }
+
+  throw new Error('登录超时，请重新运行脚本。');
+}
+
+function shuffleInPlace(array, random = Math.random) {
+  for (let i = array.length - 1; i > 0; i -= 1) {
+    const j = Math.floor(random() * (i + 1));
+    [array[i], array[j]] = [array[j], array[i]];
+  }
+  return array;
+}
+
+function sameOrder(a, b) {
+  return a.length === b.length && a.every((value, index) => value === b[index]);
+}
+
+async function getPlaylistTracks(api, playlistId, cookie, limit) {
+  const res = await api.playlist_track_all({
+    id: playlistId,
+    limit,
+    cookie,
+    timestamp: Date.now(),
+  });
+
+  if (res.body && res.body.code && res.body.code !== 200) {
+    throw new Error(`Failed to fetch playlist tracks: ${JSON.stringify(res.body)}`);
+  }
+
+  const songs = res.body && res.body.songs;
+  if (!Array.isArray(songs)) {
+    throw new Error(`Unexpected playlist response: ${JSON.stringify(res.body).slice(0, 500)}`);
+  }
+
+  return songs.map((song) => ({
+    id: String(song.id),
+    name: song.name || '',
+    artists: Array.isArray(song.ar) ? song.ar.map((artist) => artist.name).join('/') : '',
+  }));
+}
+
+async function updatePlaylistOrder(api, ids, cookie) {
+  const res = await api.playlist_order_update({
+    ids: JSON.stringify(ids.map((id) => Number(id))),
+    cookie,
+    timestamp: Date.now(),
+  });
+
+  if (!res.body || res.body.code !== 200) {
+    throw new Error(`Failed to update playlist order: ${JSON.stringify(res.body)}`);
+  }
+  return res.body;
+}
+
+function preview(title, tracks) {
+  console.log(`\n${title}`);
+  tracks.slice(0, 10).forEach((track, index) => {
+    const suffix = track.artists ? ` - ${track.artists}` : '';
+    console.log(`${String(index + 1).padStart(2, ' ')}. ${track.name}${suffix} (${track.id})`);
+  });
+  if (tracks.length > 10) console.log(`... 另有 ${tracks.length - 10} 首`);
+}
+
+async function run(argv, deps = {}) {
+  const api = deps.api || defaultApi;
+  const args = parseArgs(argv);
+
+  if (args.help) {
+    printHelp();
+    return { changed: false, reason: 'help' };
+  }
+
+  const playlistId = extractPlaylistId(args.playlist);
+  if (!playlistId) {
+    printHelp();
+    throw new Error('请用 --playlist 传入歌单 ID 或 https://music.163.com/playlist?id=... 链接。');
+  }
+
+  const cookieFile = path.resolve(args.cookieFile || COOKIE_FILE);
+  let cookie = args.forceLogin ? '' : await loadCookie(cookieFile);
+
+  if (!(await checkLogin(api, cookie))) {
+    cookie = await loginByQr(api, cookieFile, deps.loginOptions);
+  } else {
+    console.log(`已使用缓存登录态：${cookieFile}`);
+  }
+
+  const tracks = await getPlaylistTracks(api, playlistId, cookie, args.limit);
+  if (tracks.length < 2) {
+    console.log(`歌单只有 ${tracks.length} 首歌，无需打乱。`);
+    return { changed: false, reason: 'too-few-tracks', playlistId, trackCount: tracks.length };
+  }
+
+  const shuffled = shuffleInPlace([...tracks], deps.random || Math.random);
+  if (sameOrder(tracks.map((track) => track.id), shuffled.map((track) => track.id))) {
+    [shuffled[0], shuffled[1]] = [shuffled[1], shuffled[0]];
+  }
+
+  preview('当前前 10 首：', tracks);
+  preview('打乱后前 10 首：', shuffled);
+
+  if (args.dryRun) {
+    console.log('\n--dry-run 已启用，未修改歌单。');
+    return { changed: false, reason: 'dry-run', playlistId, trackCount: shuffled.length };
+  }
+
+  await updatePlaylistOrder(api, shuffled.map((track) => track.id), cookie);
+  console.log(`\n完成：已随机打乱歌单 ${playlistId} 的 ${shuffled.length} 首歌曲顺序。`);
+  return { changed: true, playlistId, trackCount: shuffled.length };
+}
+
+if (require.main === module) {
+  run(process.argv.slice(2)).catch((error) => {
+    console.error(`\n错误：${error.message}`);
+    process.exitCode = 1;
+  });
+}
+
+module.exports = {
+  parseArgs,
+  extractPlaylistId,
+  shuffleInPlace,
+  sameOrder,
+  getPlaylistTracks,
+  updatePlaylistOrder,
+  run,
+};

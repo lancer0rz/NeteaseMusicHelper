@@ -1,0 +1,19 @@
+{
+  "name": "netease-music-helper",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Helpers for NetEase Cloud Music, including randomizing playlist song order.",
+  "type": "commonjs",
+  "bin": {
+    "netease-playlist-shuffle": "./shuffle-netease-playlist.js"
+  },
+  "scripts": {
+    "shuffle": "node shuffle-netease-playlist.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "NeteaseCloudMusicApi": "^4.31.0",
+    "qrcode-terminal": "^0.12.0"
+  },
+  "devDependencies": {}
+}
