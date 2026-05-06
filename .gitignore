@@ -1,4 +1,13 @@
 node_modules/
+
+# NetEase login state / cookies. Do not commit these files.
 .netease-cookie.json
+.netease-cookie*.json
+*cookie*.json
+*cookies*.json
+
+# Local env / logs / macOS files
+.env
+.env.*
 *.log
 .DS_Store
