@@ -11,6 +11,7 @@ const {
   parseArgs,
   shuffleInPlace,
   getEditablePlaylists,
+  getSongDetails,
   updatePlaylistOrder,
   run,
 } = require('../shuffle-netease-playlist');
@@ -61,6 +62,26 @@ test('getEditablePlaylists filters subscribed playlists', async () => {
   assert.deepEqual(playlists, [{ id: '1', name: 'Mine', trackCount: 10 }]);
 });
 
+
+test('getSongDetails fetches songs in batches', async () => {
+  const calls = [];
+  const api = {
+    song_detail: async (query) => {
+      calls.push(query.ids);
+      return {
+        body: {
+          code: 200,
+          songs: query.ids.split(',').map((id) => ({ id, name: `S${id}`, ar: [] })),
+        },
+      };
+    },
+  };
+
+  const songs = await getSongDetails(api, ['1', '2', '3', '4', '5'], 'MUSIC_U=abc', 2);
+  assert.deepEqual(calls, ['1,2', '3,4', '5']);
+  assert.deepEqual(songs.map((song) => song.id), ['1', '2', '3', '4', '5']);
+});
+
 test('updatePlaylistOrder submits JSON stringified numeric ids', async () => {
   let payload;
   const api = {
@@ -83,7 +104,10 @@ test('run dry-run fetches songs but does not update order', async () => {
   let updateCalled = false;
   const api = {
     login_status: async () => ({ body: { data: { account: { id: 1 } } } }),
-    playlist_track_all: async () => ({
+    playlist_detail: async () => ({
+      body: { code: 200, playlist: { trackIds: [{ id: 1 }, { id: 2 }, { id: 3 }] } },
+    }),
+    song_detail: async () => ({
       body: {
         code: 200,
         songs: [
@@ -117,7 +141,10 @@ test('run submits shuffled order when not dry-run', async () => {
   let submittedIds;
   const api = {
     login_status: async () => ({ body: { data: { account: { id: 1 } } } }),
-    playlist_track_all: async () => ({
+    playlist_detail: async () => ({
+      body: { code: 200, playlist: { trackIds: [{ id: 1 }, { id: 2 }, { id: 3 }] } },
+    }),
+    song_detail: async () => ({
       body: {
         code: 200,
         songs: [
@@ -156,19 +183,20 @@ test('run without playlist lets user choose from editable playlists', async () =
         ],
       },
     }),
-    playlist_track_all: async (query) => {
+    playlist_detail: async (query) => {
       requestedPlaylistId = query.id;
-      return {
-        body: {
-          code: 200,
-          songs: [
-            { id: 1, name: 'A', ar: [] },
-            { id: 2, name: 'B', ar: [] },
-            { id: 3, name: 'C', ar: [] },
-          ],
-        },
-      };
+      return { body: { code: 200, playlist: { trackIds: [{ id: 1 }, { id: 2 }, { id: 3 }] } } };
     },
+    song_detail: async () => ({
+      body: {
+        code: 200,
+        songs: [
+          { id: 1, name: 'A', ar: [] },
+          { id: 2, name: 'B', ar: [] },
+          { id: 3, name: 'C', ar: [] },
+        ],
+      },
+    }),
     playlist_order_update: async () => ({ body: { code: 200 } }),
   };
 
@@ -196,9 +224,9 @@ test('run --list lists editable playlists and exits', async () => {
         playlist: [{ id: 10, name: 'First', trackCount: 3, subscribed: false }],
       },
     }),
-    playlist_track_all: async () => {
+    playlist_detail: async () => {
       trackFetchCalled = true;
-      return { body: { code: 200, songs: [] } };
+      return { body: { code: 200, playlist: { trackIds: [] } } };
     },
   };
 

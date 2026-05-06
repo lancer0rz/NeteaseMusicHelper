@@ -258,28 +258,61 @@ function sameOrder(a, b) {
   return a.length === b.length && a.every((value, index) => value === b[index]);
 }
 
-async function getPlaylistTracks(api, playlistId, cookie, limit) {
-  const res = await api.playlist_track_all({
+async function getPlaylistTrackIds(api, playlistId, cookie) {
+  const res = await api.playlist_detail({
     id: playlistId,
-    limit,
     cookie,
     timestamp: Date.now(),
   });
 
-  if (res.body && res.body.code && res.body.code !== 200) {
-    throw new Error(`Failed to fetch playlist tracks: ${JSON.stringify(res.body)}`);
+  if (!res.body || res.body.code !== 200 || !res.body.playlist || !Array.isArray(res.body.playlist.trackIds)) {
+    throw new Error(`Failed to fetch playlist detail: ${JSON.stringify(res.body).slice(0, 500)}`);
   }
 
-  const songs = res.body && res.body.songs;
-  if (!Array.isArray(songs)) {
-    throw new Error(`Unexpected playlist response: ${JSON.stringify(res.body).slice(0, 500)}`);
-  }
+  return res.body.playlist.trackIds.map((track) => String(track.id));
+}
 
-  return songs.map((song) => ({
+function normalizeSong(song) {
+  return {
     id: String(song.id),
     name: song.name || '',
     artists: Array.isArray(song.ar) ? song.ar.map((artist) => artist.name).join('/') : '',
-  }));
+  };
+}
+
+async function getSongDetails(api, ids, cookie, batchSize = 500) {
+  const songs = [];
+  for (let offset = 0; offset < ids.length; offset += batchSize) {
+    const batch = ids.slice(offset, offset + batchSize);
+    const res = await api.song_detail({
+      ids: batch.join(','),
+      cookie,
+      timestamp: Date.now(),
+    });
+
+    if (!res.body || res.body.code !== 200 || !Array.isArray(res.body.songs)) {
+      throw new Error(`Failed to fetch song details: ${JSON.stringify(res.body).slice(0, 500)}`);
+    }
+
+    songs.push(...res.body.songs.map(normalizeSong));
+  }
+  return songs;
+}
+
+async function getPlaylistTracks(api, playlistId, cookie, limit) {
+  const trackIds = await getPlaylistTrackIds(api, playlistId, cookie);
+  const limitedIds = trackIds.slice(0, limit);
+
+  if (limitedIds.length === 0) return [];
+
+  try {
+    const details = await getSongDetails(api, limitedIds, cookie);
+    const byId = new Map(details.map((song) => [song.id, song]));
+    return limitedIds.map((id) => byId.get(id) || { id, name: `歌曲 ${id}`, artists: '' });
+  } catch (error) {
+    console.warn(`歌曲详情获取失败，将只使用歌曲 ID 继续执行：${error.message}`);
+    return limitedIds.map((id) => ({ id, name: `歌曲 ${id}`, artists: '' }));
+  }
 }
 
 async function updatePlaylistOrder(api, ids, cookie) {
@@ -377,6 +410,8 @@ module.exports = {
   extractPlaylistId,
   getLoginAccount,
   getEditablePlaylists,
+  getPlaylistTrackIds,
+  getSongDetails,
   selectPlaylistInteractively,
   shuffleInPlace,
   sameOrder,
